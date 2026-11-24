@@ -210,7 +210,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser, stack: ExitS
         transport = make_transport(args.backend, args.cache_dir, stack)
     except TransportError as err:
         print(red(f"error: {err}. Export your OpenRouter key as OPENROUTER_API_KEY, "
-                  "or drop --live to use the offline stand-in."), file=sys.stderr)
+                  "or drop --live to use the mock backend."), file=sys.stderr)
         return 2
     model = args.model
     label = BACKEND_LABEL.get(args.backend, f"Jev via OpenRouter ({model})")
