@@ -1,7 +1,7 @@
 """Command line: run the demo scenarios or chat with the agent.
 
     python -m order_agent list
-    python -m order_agent demo                      # all scenarios, offline stand-in
+    python -m order_agent demo                      # all scenarios, mock System One API
     python -m order_agent demo which-order --live   # real Jev via OpenRouter
     python -m order_agent chat --live               # you are the customer and the operator
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from jevkit import (
     Transport,
     TransportError,
 )
+from jevkit.mock_server import MockSystemOneServer
 
 from .agent import OrderAgent, Outcome
 from .offline import offline_jev
@@ -104,19 +106,32 @@ def print_event(event: Event) -> None:
 # --------------------------------------------------------------------------- wiring
 
 
-def make_transport(live: bool, cache_dir: Path | None, replay: bool) -> Transport:
+def make_transport(backend: str, cache_dir: Path | None, stack: ExitStack) -> Transport:
+    """mock: real HTTP client -> local mock of OpenRouter's System One API (default).
+    offline: rules called in-process. live: Jev on OpenRouter. replay: cache only."""
     inner: Transport | None
-    if replay:
+    if backend == "replay":
         inner = None
-    elif live:
+    elif backend == "live":
         inner = OpenRouterTransport.from_env()
+    elif backend == "mock":
+        server = stack.enter_context(MockSystemOneServer(offline_jev()))
+        inner = OpenRouterTransport(api_key="mock-key", base_url=server.base_url)
     else:
         inner = offline_jev()
-    if cache_dir is None and not replay:
+    if cache_dir is None and backend != "replay":
         assert inner is not None
         return inner
     return CachingTransport(inner=inner, directory=cache_dir or Path(".jev-cache"),
-                            mode="replay" if replay else "record")
+                            mode="replay" if backend == "replay" else "record")
+
+
+BACKEND_LABEL = {
+    "mock": "mock System One API on localhost (OpenRouter wire format; illustrative "
+            "probabilities) - use --live for Jev",
+    "offline": "offline rules, in-process (illustrative probabilities)",
+    "replay": "replay from cache",
+}
 
 
 def run_scenario(s: Scenario, transport: Transport, model: str, quiet: bool = False,
@@ -171,12 +186,14 @@ def main(argv: list[str] | None = None) -> int:
         if name == "demo":
             p.add_argument("scenario", nargs="*", help="scenario ids (default: all)")
             p.add_argument("--trace-dir", type=Path, help="write a JSON audit trail per scenario")
-        p.add_argument("--live", action="store_true",
-                       help="call Jev through OpenRouter (needs OPENROUTER_API_KEY)")
+        p.add_argument("--backend", choices=["mock", "offline", "live", "replay"],
+                       default=os.environ.get("JEV_BACKEND", "mock"),
+                       help="mock (default): local mock of the System One API; "
+                            "live: Jev via OpenRouter (needs OPENROUTER_API_KEY)")
+        p.add_argument("--live", action="store_const", dest="backend", const="live",
+                       help="shorthand for --backend live")
         p.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
         p.add_argument("--cache-dir", type=Path, help="record answers here for replay")
-        p.add_argument("--replay", action="store_true",
-                       help="answer only from --cache-dir (default .jev-cache), no calls")
     args = parser.parse_args(argv)
 
     if args.cmd == "list":
@@ -184,14 +201,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{s.id:<17} {s.title}\n{'':<17} {dim(s.shows)}")
         return 0
 
+    with ExitStack() as stack:
+        return _run(args, parser, stack)
+
+
+def _run(args: argparse.Namespace, parser: argparse.ArgumentParser, stack: ExitStack) -> int:
     try:
-        transport = make_transport(args.live, args.cache_dir, args.replay)
+        transport = make_transport(args.backend, args.cache_dir, stack)
     except TransportError as err:
         print(red(f"error: {err}. Export your OpenRouter key as OPENROUTER_API_KEY, "
                   "or drop --live to use the offline stand-in."), file=sys.stderr)
         return 2
     model = args.model
-    print(dim(f"backend: {'Jev via OpenRouter (' + model + ')' if args.live else 'replay' if args.replay else 'offline stand-in (illustrative probabilities; use --live for Jev)'}"))
+    label = BACKEND_LABEL.get(args.backend, f"Jev via OpenRouter ({model})")
+    print(dim(f"backend: {label}"))
 
     if args.cmd == "chat":
         trace = Trace(listeners=[print_event])
@@ -221,4 +244,4 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
             print(red(f"  ✗ expected {s.expect_status} via "
                       f"{[t.value for t in s.expect_tools]}"))
-    return 1 if failures and not args.live else 0
+    return 1 if failures and args.backend != "live" else 0

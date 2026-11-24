@@ -35,21 +35,30 @@ customer › Hi, my order from last week never arrived and I'd like a refund ple
 python -m pip install -e '.[dev]'          # only runtime dependency: pydantic
 
 python -m order_agent list                 # the 9 scenarios
-python -m order_agent demo                 # run them all (offline stand-in for Jev)
+python -m order_agent demo                 # run them all against the mock Jev API (default)
 python -m order_agent demo which-order     # one scenario
+python -m order_agent chat                 # you play the customer and the operator
 
-export OPENROUTER_API_KEY=sk-or-...        # https://openrouter.ai/settings/keys
-python -m order_agent demo --live          # the same scenarios, answered by Jev
-python -m order_agent demo --live --cache-dir .jev-cache   # record Jev's answers…
-python -m order_agent demo --replay --cache-dir .jev-cache # …and replay them offline, exactly
-python -m order_agent chat --live          # you play the customer and the operator
-
-python -m pytest && python -m mypy         # 29 tests; mypy --strict clean
+python -m pytest && python -m mypy         # 32 tests; mypy --strict clean
 ```
 
-Without `--live`, a rule-based **offline stand-in** answers in Jev's exact wire format, so the demo
-runs with no key or network. **Its probabilities are illustrative, not Jev's.** `--live` swaps in
-the real model, and the agent code is identical in both modes. `--model` (or `JEV_MODEL`) picks
+### Backends (`--backend`, or `JEV_BACKEND`)
+
+| Backend | What answers | Needs |
+|---|---|---|
+| `mock` (default) | A local HTTP server that mimics OpenRouter's `POST /api/v1/systemone` (auth header, 401/404/400, response shape). The real `OpenRouterTransport` talks to it over HTTP; hand-written rules supply the answers. | nothing |
+| `offline` | The same rules, called in-process (no HTTP) | nothing |
+| `live` (or `--live`) | Jev on OpenRouter | `OPENROUTER_API_KEY` |
+| `replay` | Answers recorded earlier with `--cache-dir` | a cache directory |
+
+**The mock's probabilities are illustrative, not Jev's.** Switching to `--live` changes only
+where the HTTP request goes; the agent, the client and the transport stay the same.
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...                           # when you have a key
+python -m order_agent demo --live --cache-dir .jev-cache       # record Jev's answers…
+python -m order_agent demo --backend replay --cache-dir .jev-cache   # …replay them exactly
+``` `--model` (or `JEV_MODEL`) picks
 the model, default `typesafe/jev-1.14` (`~typesafe/jev-latest` also works).
 
 ## Scenarios
@@ -73,10 +82,11 @@ src/jevkit/          typed client for Jev (reusable, knows nothing about shops)
   wire.py            pydantic models of the System One request/response (noul, choice, score, refusal)
   client.py          Jev.choose() -> Choice[K]   Jev.check() -> Check   Jev.checks() -> dict[str, Check]
   transports.py      OpenRouterTransport (POST /api/v1/systemone), CachingTransport, OfflineTransport
+  mock_server.py     local mock of OpenRouter's System One API (default demo backend)
 src/order_agent/
   shop.py            mock backend: typed records, typed tool args, 7 tools, refund policy, seed data
   agent.py           the loop: possible steps -> Jev picks -> fill args -> gate -> approve -> run
-  offline.py         rule-based stand-in for Jev (offline demo/tests only)
+  offline.py         rules that answer for Jev in the mock (demo/tests only)
   scenarios.py       the 9 scripted demos
   trace.py, cli.py   audit trail and terminal rendering
 ```
@@ -140,9 +150,10 @@ offline and gives the same decisions.
 ## Notes
 
 - Jev's API: [System One on OpenRouter](https://openrouter.ai/docs/guides/community/typesafe-sdk),
-  [Decisions API](https://openrouter.ai/docs/guides/features/decisions). The live transport is
-  unit-tested against the documented request/response shape. In this PoC's development
-  environment it was not run against the real model, because no key was available there.
+  [Decisions API](https://openrouter.ai/docs/guides/features/decisions). For now the
+  demo runs on the mock; the HTTP transport is exercised end to end against it and checked
+  against the documented request/response shape, but has not yet been run against the real
+  model.
   Thresholds are starting points: tune them once you see Jev's real probabilities on
   your data.
 - The tools are in-process for clarity. In production they would sit behind MCP servers or
